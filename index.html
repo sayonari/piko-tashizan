@@ -1,0 +1,941 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ピコたしざん">
+<meta name="theme-color" content="#1d2b53">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<title>ピコピコたしざん</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;height:100%;background:#1d2b53;overflow:hidden;touch-action:none;
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;overscroll-behavior:none}
+canvas{display:block;position:fixed;left:0;top:0}
+#safe{position:fixed;visibility:hidden;pointer-events:none;
+  padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);
+  padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="safe"></div>
+<script>
+'use strict';
+// =====================================================================
+//  ピコピコたしざん — 10のぼう と 1のつぶ で 2けたの たしざん
+// =====================================================================
+
+// ---------- palette (PICO-8 風) ----------
+const P = {black:'#000000', navy:'#1d2b53', plum:'#7e2553', dgreen:'#008751', brown:'#ab5236',
+  dgray:'#5f574f', lgray:'#c2c3c7', white:'#fff1e8', red:'#ff004d', orange:'#ffa300',
+  yellow:'#ffec27', green:'#00e436', blue:'#29adff', lav:'#83769c', pink:'#ff77a8', peach:'#ffccaa'};
+const TEN = {dark:'#4a1d00', base:'#ffa300', hi:'#ffe28c', lo:'#d45f00'};
+const ONE = {dark:'#06204a', base:'#29adff', hi:'#c4f0ff', lo:'#1868c0'};
+const FIRE = [P.yellow, P.orange, P.pink, P.green, P.blue, P.white, P.red, P.peach];
+const FONT = '"DotGothic16","Hiragino Maru Gothic ProN","Hiragino Sans",sans-serif';
+
+// ---------- utils ----------
+const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const E = {
+  linear: t => t,
+  outCubic: t => 1 - Math.pow(1 - t, 3),
+  inCubic: t => t * t * t,
+  inOutCubic: t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+  outBack: t => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); },
+};
+
+// ---------- save ----------
+const KEY = 'piko-tashizan-v1';
+const SAVE = {best: {}, stars: 0, sfx: true, voice: true, bgm: true};
+try { Object.assign(SAVE, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch (e) {}
+function save() { try { localStorage.setItem(KEY, JSON.stringify(SAVE)); } catch (e) {} }
+
+// ---------- tweens / timers / flows ----------
+let tweens = [], timers = [];
+function tw(o, to, dur, opt = {}) {
+  return new Promise(res => tweens.push({o, to, dur, t: -(opt.delay || 0), ease: opt.ease || E.outCubic, from: null, res}));
+}
+function updTweens(dt) {
+  const list = tweens.slice();
+  for (const t of list) {
+    t.t += dt; if (t.t < 0) continue;
+    if (!t.from) { t.from = {}; for (const k in t.to) t.from[k] = t.o[k]; }
+    const p = Math.min(1, t.t / t.dur), e = t.ease(p);
+    for (const k in t.to) t.o[k] = t.from[k] + (t.to[k] - t.from[k]) * e;
+    if (p >= 1) { const i = tweens.indexOf(t); if (i >= 0) tweens.splice(i, 1); t.res(); }
+  }
+}
+const wait = s => new Promise(r => timers.push({t: s, r}));
+function updTimers(dt) {
+  const list = timers.slice();
+  for (const tm of list) if ((tm.t -= dt) <= 0) { timers.splice(timers.indexOf(tm), 1); tm.r(); }
+}
+let flowId = 0; const CANCEL = {cancel: 1};
+function mkFlow(id) {
+  return { alive: () => id === flowId,
+    check() { if (id !== flowId) throw CANCEL; },
+    async sleep(s) { await wait(s); if (id !== flowId) throw CANCEL; } };
+}
+const newFlow = () => mkFlow(++flowId);
+const curFlow = () => mkFlow(flowId);
+const run = p => p.catch(e => { if (e !== CANCEL) console.error(e); });
+
+// =====================================================================
+//  SOUND (WebAudio chiptune)
+// =====================================================================
+const S = {ac: null};
+const mf = m => 440 * Math.pow(2, (m - 69) / 12);
+function audioInit() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+  if (!S.ac) {
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    const ac = S.ac = new AC();
+    S.master = ac.createGain(); S.master.gain.value = 0.7; S.master.connect(ac.destination);
+    S.sfxBus = ac.createGain(); S.sfxBus.connect(S.master);
+    S.musBus = ac.createGain(); S.musBus.gain.value = 0.3; S.musBus.connect(S.master);
+    // lo-fi noise (sample & hold)
+    const len = ac.sampleRate; const buf = ac.createBuffer(1, len, ac.sampleRate); const d = buf.getChannelData(0);
+    let v = 0; for (let i = 0; i < len; i++) { if (i % 4 === 0) v = Math.random() * 2 - 1; d[i] = v; }
+    S.nbuf = buf;
+    const pulse = duty => { const n = 32, re = new Float32Array(n), im = new Float32Array(n);
+      for (let k = 1; k < n; k++) re[k] = 4 / (k * Math.PI) * Math.sin(k * Math.PI * duty);
+      return ac.createPeriodicWave(re, im); };
+    S.p25 = pulse(0.25); S.p12 = pulse(0.125);
+    // iOS unlock
+    const s = ac.createBufferSource(); s.buffer = ac.createBuffer(1, 1, 22050); s.connect(ac.destination); s.start(0);
+    applySound();
+  }
+  if (S.ac.state !== 'running') S.ac.resume();
+}
+function applySound() {
+  if (!S.ac) return;
+  S.sfxBus.gain.value = SAVE.sfx ? 1 : 0;
+  if (SAVE.bgm) BGM.start(); else BGM.stop();
+}
+function tone(f, dur, o = {}) {
+  if (!S.ac) return;
+  const ac = S.ac, t = o.at != null ? o.at : ac.currentTime + (o.delay || 0);
+  const osc = ac.createOscillator(), g = ac.createGain();
+  const ty = o.type || 'p25';
+  if (ty === 'p25') osc.setPeriodicWave(S.p25); else if (ty === 'p12') osc.setPeriodicWave(S.p12); else osc.type = ty;
+  osc.frequency.setValueAtTime(f, t);
+  if (o.slide) osc.frequency.exponentialRampToValueAtTime(Math.max(30, f * o.slide), t + dur);
+  const v = o.vol != null ? o.vol : 0.12;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(v, t + 0.006);
+  g.gain.setValueAtTime(v, t + dur * 0.55);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(g); g.connect(o.dest || S.sfxBus);
+  osc.start(t); osc.stop(t + dur + 0.05);
+}
+function noise(dur, o = {}) {
+  if (!S.ac) return;
+  const ac = S.ac, t = o.at != null ? o.at : ac.currentTime + (o.delay || 0);
+  const src = ac.createBufferSource(); src.buffer = S.nbuf; src.loop = true;
+  const fl = ac.createBiquadFilter(); fl.type = o.ft || 'lowpass';
+  fl.frequency.setValueAtTime(o.f || 3000, t);
+  if (o.f2) fl.frequency.exponentialRampToValueAtTime(o.f2, t + dur);
+  const g = ac.createGain(); const v = o.vol != null ? o.vol : 0.1;
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(fl); fl.connect(g); g.connect(o.dest || S.sfxBus);
+  src.start(t, Math.random() * 0.5); src.stop(t + dur + 0.05);
+}
+const SCALE = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24];
+const sfx = {
+  tap() { tone(mf(84), .05, {vol: .1}); tone(mf(91), .06, {delay: .04, vol: .08}); },
+  pop(i) { tone(mf(67 + SCALE[i % SCALE.length]), .08, {type: 'p12', vol: .1}); },
+  land(i) { tone(mf(72 + SCALE[i % SCALE.length]), .07, {vol: .1}); noise(.04, {vol: .05, f: 5000}); },
+  count(i) { tone(mf(72 + SCALE[i % SCALE.length]), .1, {type: 'square', vol: .09}); },
+  whoosh() { noise(.35, {vol: .12, ft: 'bandpass', f: 600, f2: 4000}); tone(mf(55), .3, {type: 'triangle', slide: 4, vol: .12}); },
+  merge() { tone(mf(60), .35, {type: 'p25', slide: 2.5, vol: .08}); noise(.3, {vol: .08, ft: 'bandpass', f: 800, f2: 5000}); },
+  shine() { [84, 88, 91, 96, 88, 91, 96, 100].forEach((m, i) => tone(mf(m), .07, {delay: i * .045, type: 'p12', vol: .08})); },
+  carry() {
+    noise(.5, {vol: .25, f: 3000, f2: 200});
+    tone(mf(48), .5, {type: 'triangle', slide: 3, vol: .25});
+    [72, 76, 79, 84, 88, 91, 96].forEach((m, i) => tone(mf(m), .1, {delay: .05 + i * .04, vol: .1}));
+  },
+  jump() { tone(mf(60), .25, {slide: 3.5, vol: .1}); },
+  thud() { noise(.2, {vol: .2, f: 900, f2: 100}); tone(mf(40), .18, {type: 'triangle', slide: .5, vol: .3}); },
+  correct() {
+    tone(mf(88), .14, {vol: .14}); tone(mf(84), .45, {delay: .14, vol: .14}); // ピン ポーン
+    tone(mf(64), .14, {type: 'triangle', vol: .25}); tone(mf(60), .45, {delay: .14, type: 'triangle', vol: .25});
+    [84, 88, 91, 96].forEach((m, i) => tone(mf(m), .08, {delay: .5 + i * .06, type: 'p12', vol: .08}));
+  },
+  wrong() { tone(mf(50), .16, {type: 'square', vol: .1}); tone(mf(46), .4, {delay: .18, type: 'square', vol: .1, slide: .85}); },
+  coin() { tone(988, .08, {type: 'square', vol: .1}); tone(1319, .4, {delay: .08, type: 'square', vol: .1}); },
+  combo(n) { for (let i = 0; i < Math.min(n + 2, 10); i++) tone(mf(72 + SCALE[i]), .07, {delay: i * .05, vol: .09}); },
+  boom() { noise(.6, {vol: .22, f: 2500, f2: 150}); },
+  select() { tone(mf(79), .06, {vol: .1}); tone(mf(84), .06, {delay: .06, vol: .1}); tone(mf(91), .12, {delay: .12, vol: .1}); },
+  start() { [60, 64, 67, 72, 76, 79, 84].forEach((m, i) => tone(mf(m), .09, {delay: i * .05, vol: .1})); },
+  fanfare() {
+    const mel = [[72, 0, .12], [72, .15, .12], [72, .3, .12], [72, .45, .35], [68, .85, .35], [70, 1.25, .35], [72, 1.65, .2], [70, 1.85, .12], [72, 2.0, .9]];
+    mel.forEach(([m, d, l]) => { tone(mf(m + 12), l, {delay: d, vol: .12}); tone(mf(m + 4), l, {delay: d, type: 'p12', vol: .06}); });
+    [[48, 0], [48, .45], [44, .85], [46, 1.25], [48, 1.65], [48, 2.0]].forEach(([m, d]) => tone(mf(m), .35, {delay: d, type: 'triangle', vol: .25}));
+  },
+};
+
+// ---------- BGM (ループする ちいさな きょく) ----------
+const LEAD = [76,0,79,0,84,0,79,0, 81,0,79,76,77,0,74,0, 76,0,79,0,84,0,86,0, 84,0,0,0,0,0,0,0,
+              81,0,84,0,81,79,77,0, 79,0,76,0,72,0,74,0, 76,77,79,81,79,77,76,74, 72,0,0,0,0,0,0,0];
+const BASS = [48,0,55,0,48,0,55,0, 53,0,60,0,55,0,59,0, 48,0,55,0,57,0,52,0, 53,0,55,0,48,0,43,0,
+              53,0,57,0,48,0,52,0, 55,0,59,0,48,0,55,0, 53,0,57,0,55,0,59,0, 48,0,55,0,48,0,0,0];
+const BGM = {timer: null, step: 0, next: 0,
+  start() { if (!S.ac || this.timer) return; this.step = 0; this.next = S.ac.currentTime + .1; this.timer = setInterval(() => this.tick(), 40); },
+  stop() { if (this.timer) clearInterval(this.timer); this.timer = null; },
+  tick() {
+    const ac = S.ac; const st = 0.19;
+    while (this.next < ac.currentTime + .2) {
+      const i = this.step % 64, at = this.next;
+      if (LEAD[i]) tone(mf(LEAD[i]), st * .9, {at, vol: .07, dest: S.musBus});
+      if (BASS[i]) tone(mf(BASS[i]), st * 1.8, {at, type: 'triangle', vol: .22, dest: S.musBus});
+      if (i % 2 === 1) noise(.03, {at, vol: .04, ft: 'highpass', f: 7000, dest: S.musBus});
+      if (i % 8 === 4) noise(.08, {at, vol: .06, f: 2500, dest: S.musBus});
+      this.next += st; this.step++;
+    }
+  }};
+
+// ---------- こえ ----------
+let jaVoice = null;
+function pickVoice() {
+  if (!window.speechSynthesis) return;
+  const vs = speechSynthesis.getVoices().filter(v => /^ja/i.test(v.lang));
+  jaVoice = vs.find(v => /kyoko/i.test(v.name)) || vs.find(v => /o-ren|otoya|hattori/i.test(v.name)) || vs[0] || null;
+}
+if (window.speechSynthesis) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+function speak(t, delay = 0) {
+  if (!SAVE.voice || !window.speechSynthesis) return;
+  const go = () => {
+    try {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(t); u.lang = 'ja-JP'; if (jaVoice) u.voice = jaVoice;
+      u.rate = 1.0; u.pitch = 1.25; u.volume = 1; speechSynthesis.speak(u);
+    } catch (e) {}
+  };
+  if (delay) setTimeout(go, delay * 1000); else go();
+}
+
+// =====================================================================
+//  CANVAS / DRAW HELPERS
+// =====================================================================
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W = 0, H = 0, DPR = 1, T = 0, shake = 0;
+const L = {};
+const STARS = Array.from({length: 90}, () => ({x: Math.random(), y: Math.random(), p: Math.random() * 6, s: Math.random() < .2 ? 2 : 1}));
+
+const DIG = {
+  '0': ['01110','10001','10011','10101','11001','10001','01110'],
+  '1': ['00100','01100','00100','00100','00100','00100','01110'],
+  '2': ['01110','10001','00001','00010','00100','01000','11111'],
+  '3': ['11111','00010','00100','00010','00001','10001','01110'],
+  '4': ['00010','00110','01010','10010','11111','00010','00010'],
+  '5': ['11111','10000','11110','00001','00001','10001','01110'],
+  '6': ['00110','01000','10000','11110','10001','10001','01110'],
+  '7': ['11111','00001','00010','00100','01000','01000','01000'],
+  '8': ['01110','10001','10001','01110','10001','10001','01110'],
+  '9': ['01110','10001','10001','01111','00001','00010','01100'],
+  '+': ['00000','00100','00100','11111','00100','00100','00000'],
+  '=': ['00000','00000','11111','00000','11111','00000','00000'],
+  '?': ['01110','10001','00001','00010','00100','00000','00100'],
+  ' ': ['00000','00000','00000','00000','00000','00000','00000'],
+};
+// ピクセル数字: cols は 1色 or 文字ごとの配列
+function ptext(str, x, y, px, cols, o = {}) {
+  const cw = 6 * px, tw = str.length * cw - px;
+  const sx = o.align === 'left' ? x : o.align === 'right' ? x - tw : x - tw / 2;
+  const sy = y - 3.5 * px;
+  const passes = o.shadow === false ? [0] : [1, 0];
+  for (const pass of passes) {
+    const off = pass ? Math.max(1, px * .4) : 0;
+    for (let i = 0; i < str.length; i++) {
+      const g = DIG[str[i]]; if (!g) continue;
+      ctx.fillStyle = pass ? (o.shadowCol || 'rgba(0,0,0,.55)') : (typeof cols === 'string' ? cols : (cols[i] || P.white));
+      for (let r = 0; r < 7; r++) for (let k = 0; k < 5; k++)
+        if (g[r][k] === '1') ctx.fillRect(sx + i * cw + k * px + off, sy + r * px + off, px + .6, px + .6);
+    }
+  }
+  return tw;
+}
+const numCols = n => n >= 10 ? [TEN.base, ONE.base] : [ONE.base];
+function eqCols(a, b) { return [...numCols(a), P.white, ...numCols(b), P.white]; }
+
+function jtext(t, x, y, size, col, o = {}) {
+  ctx.font = `${Math.round(size)}px ${FONT}`;
+  ctx.textAlign = o.align || 'center'; ctx.textBaseline = 'middle';
+  if (o.outline !== false) {
+    ctx.lineJoin = 'round'; ctx.lineWidth = Math.max(3, size * .22); ctx.strokeStyle = o.outline || '#000';
+    ctx.strokeText(t, x, y);
+  }
+  ctx.fillStyle = col; ctx.fillText(t, x, y);
+}
+function rrect(x, y, w, h, r) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+  else { ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+}
+// ベベル付きキューブ
+function cube(x, y, s, col) {
+  const o = Math.max(1, s * .07), b = Math.max(1, s * .16);
+  ctx.fillStyle = col.dark; ctx.fillRect(x, y, s, s);
+  ctx.fillStyle = col.lo; ctx.fillRect(x + o, y + o, s - 2 * o, s - 2 * o);
+  ctx.fillStyle = col.base; ctx.fillRect(x + o, y + o, s - 2 * o - b, s - 2 * o - b);
+  ctx.fillStyle = col.hi; ctx.fillRect(x + o, y + o, s - 2 * o - b, b); ctx.fillRect(x + o, y + o, b, s - 2 * o - b);
+  ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.fillRect(x + o + b * .5, y + o + b * .5, b * .7, b * .7);
+}
+function rod(x, y, s, col) {
+  ctx.fillStyle = col.dark; ctx.fillRect(x - s * .05, y - s * .05, s * 1.1, s * 10.1);
+  for (let i = 0; i < 10; i++) cube(x, y + i * s, s, col);
+}
+const SPR = {
+  cat: ['..1.......1..', '.121.....121.', '.12211111221.', '.12222222221.', '1222222222221', '1220222220221', '1220222220221', '1232222222321', '1222220222221', '.12222222221.', '..111111111..'],
+  catHappy: ['..1.......1..', '.121.....121.', '.12211111221.', '.12222222221.', '1222222222221', '1222222222221', '1200222220021', '1232222222321', '1222200022221', '.12222222221.', '..111111111..'],
+  star: ['...1...', '..111..', '1111111', '.11111.', '..111..', '.11.11.', '11...11'],
+};
+function sprite(rows, x, y, px, pal) {
+  for (let r = 0; r < rows.length; r++) for (let k = 0; k < rows[r].length; k++) {
+    const ch = rows[r][k]; if (ch === '.') continue;
+    ctx.fillStyle = pal[ch]; ctx.fillRect(x + k * px, y + r * px, px + .6, px + .6);
+  }
+}
+const CATPAL = {'0': '#1d1d2b', '1': '#1d1d2b', '2': P.yellow, '3': P.pink};
+function drawStar(cx, cy, size, col) {
+  const px = size / 7; sprite(SPR.star, cx - size / 2 + px * .4, cy - size / 2 + px * .4, px, {'1': 'rgba(0,0,0,.5)'});
+  sprite(SPR.star, cx - size / 2, cy - size / 2, px, {'1': col});
+}
+
+// ---------- particles / popups ----------
+let parts = [], pops = [];
+function burst(x, y, n, cols = FIRE, spd = 1, size = 1) {
+  const u = L.u || 400;
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, v = (0.3 + Math.random()) * u * .55 * spd;
+    const life = .5 + Math.random() * .7;
+    parts.push({x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - u * .15 * spd, life, max: life, col: pick(cols), sz: u * (.008 + Math.random() * .012) * size});
+  }
+}
+function popText(t, x, y, size, col, o = {}) { pops.push({t, x, y, size, col, life: o.life || 1.2, max: o.life || 1.2, pix: o.pix, cols: o.cols}); }
+function updFx(dt) {
+  const g = (L.u || 400) * 1.3;
+  for (const p of parts) { p.vy += g * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= .985; p.life -= dt; }
+  parts = parts.filter(p => p.life > 0);
+  for (const p of pops) { p.y -= (L.u || 400) * .12 * dt; p.life -= dt; }
+  pops = pops.filter(p => p.life > 0);
+  shake = Math.max(0, shake - dt);
+}
+function drawFx() {
+  for (const p of parts) {
+    ctx.globalAlpha = clamp(p.life / p.max * 1.5, 0, 1); ctx.fillStyle = p.col;
+    ctx.fillRect(p.x - p.sz / 2, p.y - p.sz / 2, p.sz, p.sz);
+  }
+  ctx.globalAlpha = 1;
+  for (const p of pops) {
+    const k = p.life / p.max, sc = k > .85 ? 1 + (k - .85) * 4 : 1;
+    ctx.globalAlpha = clamp(k * 2.5, 0, 1);
+    if (p.pix) ptext(p.t, p.x, p.y, p.size * sc / 7, p.cols || p.col);
+    else jtext(p.t, p.x, p.y, p.size * sc, p.col);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawBg() {
+  ctx.fillStyle = P.navy; ctx.fillRect(0, 0, W, H);
+  for (const s of STARS) {
+    const a = .35 + .65 * Math.max(0, Math.sin(T * 1.5 + s.p));
+    ctx.fillStyle = `rgba(255,241,232,${a * .6})`;
+    const y = ((s.y * H + T * 6 * s.s) % H);
+    ctx.fillRect(s.x * W, y, s.s * 2, s.s * 2);
+  }
+}
+
+// ---------- buttons ----------
+function Btn(o) { return Object.assign({x: 0, y: 0, w: 0, h: 0, vis: true, en: true, press: 0, sc: 1, shake: 0}, o); }
+function drawBtn(b) {
+  if (!b.vis || b.sc <= .01) return;
+  const d = b.h * .09, pr = b.press > 0 ? d * .7 * b.press : 0;
+  ctx.save();
+  ctx.translate(b.x + b.w / 2 + Math.sin(T * 60) * b.shake * b.h * .12, b.y + b.h / 2);
+  ctx.scale(b.sc, b.sc);
+  const x = -b.w / 2, y = -b.h / 2, r = Math.min(b.w, b.h) * .2;
+  const col = b.en ? (b.col || P.white) : '#6b6f80', dcol = b.en ? (b.dcol || P.lgray) : '#3c3f4f';
+  rrect(x, y + d, b.w, b.h - d, r); ctx.fillStyle = '#000a'; ctx.fill();
+  rrect(x, y + d, b.w, b.h - d, r); ctx.fillStyle = dcol; ctx.fill();
+  rrect(x, y + pr, b.w, b.h - d, r); ctx.fillStyle = col; ctx.fill();
+  if (!b.noHi) ctx.fillStyle = 'rgba(255,255,255,.35)', rrect(x + r * .6, y + pr + (b.h - d) * .1, b.w - r * 1.2, (b.h - d) * .14, (b.h - d) * .07), ctx.fill();
+  ctx.translate(0, pr - d / 2);
+  if (b.draw) b.draw(b, 0, 0);
+  ctx.restore();
+}
+function hit(b, x, y) { return b.vis && b.en && b.sc > .5 && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
+function iconBtn(emoji, onTap, getOff) {
+  return Btn({col: '#2b3a6b', dcol: '#111a38', onTap, draw(b, cx, cy) {
+    ctx.globalAlpha = getOff && getOff() ? .35 : 1;
+    ctx.font = `${Math.round(b.h * .5)}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(emoji, 0, cy);
+    ctx.globalAlpha = 1;
+    if (getOff && getOff()) { ctx.strokeStyle = P.red; ctx.lineWidth = b.h * .08; ctx.beginPath(); ctx.moveTo(-b.w * .28, -b.h * .3); ctx.lineTo(b.w * .28, b.h * .22); ctx.stroke(); }
+  }});
+}
+
+// =====================================================================
+//  GAME DATA
+// =====================================================================
+const STAGES = [
+  {name: '10と いくつ',      ex: '30+4',  gen: () => [10 * rnd(1, 8), rnd(1, 9)]},
+  {name: 'たす ひとけた',    ex: '23+4',  gen: () => { const a1 = rnd(0, 7); return [10 * rnd(1, 8) + a1, rnd(1, 9 - a1)]; }},
+  {name: 'たす なんじゅう',  ex: '23+30', gen: () => { const aT = rnd(1, 8); return [10 * aT + rnd(1, 9), 10 * rnd(1, 9 - aT)]; }},
+  {name: '2けた たす 2けた', ex: '23+14', gen: () => { const aT = rnd(1, 7), a1 = rnd(0, 8); return [10 * aT + a1, 10 * rnd(1, 8 - aT) + rnd(1, 9 - a1)]; }},
+  {name: 'くりあがり!',      ex: '27+5',  gen: () => { const a1 = rnd(2, 9); return [10 * rnd(1, 8) + a1, rnd(10 - a1, 9)]; }},
+  {name: 'くりあがり 2けた', ex: '38+25', gen: () => { const a1 = rnd(1, 9), aT = rnd(1, 7); return [10 * aT + a1, 10 * rnd(1, 8 - aT) + rnd(Math.max(1, 10 - a1), 9)]; }},
+  {name: 'ぜんぶ ミックス',  ex: '??+??', gen: () => STAGES[rnd(1, 5)].gen()},
+];
+const CARD_COLS = ['#008751', '#1a70c8', '#6b5fa0', '#d0487a', '#c97800', '#c8003c', '#7e2553'];
+const PRAISE = ['すごい!', 'やったね!', 'てんさい!', 'ばっちり!', 'かんぺき!', 'せいかい!', 'いいね!'];
+
+function makeChoices(a, b) {
+  const s = a + b, carry = (a % 10) + (b % 10) >= 10;
+  const ok = v => v >= 1 && v <= 99 && v !== s;
+  const out = [s];
+  const tens = shuffle([s + 10, s - 10]); if (carry) tens.unshift(s - 10);
+  const near = shuffle([s + 1, s - 1, s + 2, s - 2]);
+  const t = tens.find(ok); if (t != null) out.push(t);
+  const n = near.find(v => ok(v) && !out.includes(v)); if (n != null) out.push(n);
+  for (const v of [s + 11, s - 11, s + 9, s - 9, s + 3, s - 3]) if (out.length < 3 && ok(v) && !out.includes(v)) out.push(v);
+  return shuffle(out);
+}
+
+// マット(そろばん風のばんめん) 座標 — 単位は「つぶ 1こ」
+const M = {tensW: 13.4, onesW: 7.2, headH: 1.6, rowH: 11.3};
+const MATW = M.tensW + M.onesW, MATH = M.headH + 2 * M.rowH;
+const rodPos = (r, i) => ({x: 0.7 + i * 1.4, y: M.headH + r * M.rowH + 0.65});
+const cubePos = (r, i) => ({x: M.tensW + 0.75 + (i % 5) * 1.2, y: M.headH + r * M.rowH + 0.65 + Math.floor(i / 5) * 1.2});
+const cellC = (r, col) => ({x: L.mat.x + (col ? M.tensW + M.onesW / 2 : M.tensW / 2) * L.c, y: L.mat.y + (M.headH + r * M.rowH + M.rowH / 2) * L.c});
+
+// =====================================================================
+//  SCENES
+// =====================================================================
+let scene = null, sceneName = '';
+const scenes = {};
+function setScene(n) {
+  tweens = []; timers = []; parts = []; pops = [];
+  sceneName = n; scene = scenes[n]; scene.enter && scene.enter(); layout();
+}
+
+// ---------------- TITLE ----------------
+scenes.title = {
+  fall: [],
+  enter() { this.fall = []; this.btns = []; },
+  layout() {},
+  update(dt) {
+    if (Math.random() < dt * 5) this.fall.push({x: Math.random(), y: -.3, v: .08 + Math.random() * .12, rod: Math.random() < .35, r: 0});
+    for (const f of this.fall) f.y += f.v * dt;
+    this.fall = this.fall.filter(f => f.y < 1.3);
+  },
+  draw() {
+    const u = L.u, s = u * .045;
+    ctx.globalAlpha = .5;
+    for (const f of this.fall) { if (f.rod) rod(f.x * W, f.y * H, s, TEN); else cube(f.x * W, f.y * H, s * 1.3, ONE); }
+    ctx.globalAlpha = 1;
+    const cx = L.x0 + L.w / 2, k = Math.min(u, L.h * .75), yy = f => L.y0 + L.h * f;
+    jtext('ピコピコ', cx, yy(.16), k * .11, P.yellow, {outline: P.plum});
+    const word = 'たしざん', sz = k * .19, step = sz * 1.02, cy = yy(.33);
+    for (let i = 0; i < 4; i++) {
+      const col = [P.orange, P.blue, P.pink, P.green][i];
+      jtext(word[i], cx + (i - 1.5) * step, cy + Math.sin(T * 4 + i * .8) * sz * .08, sz, col, {outline: '#000'});
+    }
+    ptext('10+1', cx, yy(.49), k * .016, [TEN.base, TEN.base, P.white, ONE.base]);
+    const mpx = k * .016, mw = 13 * mpx, bob = Math.abs(Math.sin(T * 5)) * k * .04;
+    sprite(Math.sin(T * 1.3) > .7 ? SPR.catHappy : SPR.cat, cx - mw / 2, yy(.76) - bob - 11 * mpx, mpx, CATPAL);
+    if (Math.sin(T * 5) > -.3) jtext('タッチして スタート!', cx, yy(.9), k * .065, P.white, {outline: P.navy});
+  },
+  tap() {
+    audioInit(); sfx.start(); speak('ピコピコ たしざん!');
+    setScene('select');
+  },
+};
+
+// ---------------- SELECT ----------------
+scenes.select = {
+  enter() {
+    const t = (k) => () => { SAVE[k] = !SAVE[k]; save(); audioInit(); applySound(); sfx.tap(); if (k === 'voice' && SAVE.voice) speak('こえ オン'); if (k === 'voice' && !SAVE.voice && window.speechSynthesis) speechSynthesis.cancel(); };
+    this.tog = [iconBtn('🔊', t('sfx'), () => !SAVE.sfx), iconBtn('🗣️', t('voice'), () => !SAVE.voice), iconBtn('🎵', t('bgm'), () => !SAVE.bgm)];
+    this.cards = STAGES.map((st, i) => Btn({col: CARD_COLS[i], dcol: '#0008', sc: 0, noHi: true, onTap: () => { sfx.select(); startStage(i); },
+      draw: (b) => drawCard(b, st, i)}));
+    this.cards.forEach((c, i) => tw(c, {sc: 1}, .4, {delay: .05 * i, ease: E.outBack}));
+    this.btns = [...this.tog, ...this.cards];
+  },
+  layout() {
+    const {x0, y0, w, h} = L, bar = L.bar;
+    this.tog.forEach((b, i) => Object.assign(b, {x: x0 + w - (3 - i) * (bar + 4) - 4, y: y0 + 6, w: bar, h: bar}));
+    const top = y0 + bar + 16 + L.u * .1, gap = clamp(L.u * .03, 8, 20);
+    const cols = L.portrait ? 2 : 4, rows = Math.ceil(STAGES.length / cols);
+    const cw = (w - gap * (cols + 1)) / cols, ch = Math.min((y0 + h - top - gap * rows) / rows, cw * .9);
+    this.hdrY = y0 + bar + 8 + L.u * .05;
+    this.cards.forEach((b, i) => {
+      const r = Math.floor(i / cols), c = i % cols;
+      const n = r === rows - 1 ? STAGES.length - r * cols : cols;
+      const ox = x0 + (w - (n * cw + (n - 1) * gap)) / 2;
+      Object.assign(b, {x: ox + c * (cw + gap), y: top + r * (ch + gap), w: cw, h: ch});
+    });
+  },
+  update() {},
+  draw() {
+    const u = L.u;
+    jtext('どれで あそぶ?', L.x0 + L.w / 2, this.hdrY, u * .075, P.white, {outline: P.plum});
+    drawStar(L.x0 + L.bar * .5 + 6, L.y0 + 6 + L.bar / 2, L.bar * .6, P.yellow);
+    jtext('' + SAVE.stars, L.x0 + L.bar + 10, L.y0 + 6 + L.bar / 2, L.bar * .55, P.yellow, {align: 'left'});
+    this.btns.forEach(drawBtn);
+  },
+};
+function drawCard(b, st, i) {
+  const w = b.w, h = b.h - b.h * .09, top = -h / 2;
+  const best = SAVE.best[i];
+  // ばんごう
+  ctx.fillStyle = '#0006'; rrect(-w / 2 + w * .05, top + h * .07, h * .22, h * .22, h * .05); ctx.fill();
+  jtext('' + (i + 1), -w / 2 + w * .05 + h * .11, top + h * .18, h * .18, P.white, {outline: false});
+  // れい
+  ctx.fillStyle = '#1d2b53'; rrect(-w * .4, top + h * .33, w * .8, h * .33, h * .06); ctx.fill();
+  const ex = st.ex, parts = ex.split('+');
+  const cols = [...(parts[0] === '??' ? [P.yellow, P.yellow] : numCols(+parts[0])), P.white, ...(parts[1] === '??' ? [P.yellow, P.yellow] : numCols(+parts[1]))];
+  const px = Math.min(h * .2 / 7, w * .7 / (ex.length * 6));
+  ptext(ex.replace(/\?/g, '?'), 0, top + h * .495, px, cols);
+  jtext(st.name, 0, top + h * .83, Math.min(h * .14, w * .9 / st.name.length), P.white, {outline: '#0009'});
+  if (best != null) {
+    ctx.font = `${Math.round(h * .2)}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(best >= 10 ? '👑' : '🏅', w / 2 - h * .17, top + h * .18);
+    jtext('★' + best, w / 2 - h * .4, top + h * .18, h * .13, P.yellow, {outline: '#000'});
+  }
+}
+
+// ---------------- PLAY ----------------
+let G = null;
+function startStage(si) {
+  G = {si, q: 0, stars: Array(10).fill(0), combo: 0, blocks: [], tens: [], ones: [], tensB: [], onesB: [],
+    a: 0, b: 0, sum: 0, phase: 'intro', qA: 0, reveal: 0, wmA: 1, lblA: 0, bubble: null, cat: {jump: 0, happy: 0, shake: 0},
+    flyers: [], clear: null, last: -1, hintShown: false};
+  setScene('play');
+  run(newQuestion());
+}
+scenes.play = {
+  enter() {
+    const pb = this;
+    this.home = iconBtn('🏠', () => { sfx.tap(); newFlow(); if (window.speechSynthesis) speechSynthesis.cancel(); setScene('select'); });
+    this.say = iconBtn('🔊', () => { sfx.tap(); if (G.phase !== 'clear') speak(`${G.a} たす ${G.b} は?`); });
+    this.merge = Btn({col: P.green, dcol: P.dgreen, vis: false, sc: 0, onTap: () => { sfx.tap(); run(doMerge()); },
+      draw(b) { const a = (T * 6) % (Math.PI * 2);
+        jtext('がったい!', 0, 0, Math.min(b.h * .45, b.w * .8 / 5), P.white, {outline: P.dgreen});
+        ctx.fillStyle = P.yellow; const s = b.h * .12;
+        for (const sx of [-1, 1]) { const x = sx * b.w * .42, y = Math.sin(a) * s * .4; ctx.beginPath(); ctx.moveTo(x - s, y - s * .5); ctx.lineTo(x + s, y - s * .5); ctx.lineTo(x, y + s * .8); ctx.fill(); }
+      }});
+    this.choices = [0, 1, 2].map(() => Btn({vis: false, sc: 0, val: 0, good: 0, onTap: (b) => run(onChoice(b)),
+      draw(b) { const s = '' + b.val, h = b.h * .91;
+        const px = Math.min(h * .55 / 7, b.w * .7 / (s.length * 6));
+        ptext(s, 0, 0, px, b.en ? numCols(b.val) : '#9a9aa8', {shadowCol: b.en ? 'rgba(0,0,0,.35)' : 'rgba(0,0,0,.2)'});
+        if (!b.en) { ctx.strokeStyle = P.red; ctx.lineWidth = h * .06; const r = h * .25; ctx.beginPath(); ctx.moveTo(-r, -r); ctx.lineTo(r, r); ctx.moveTo(r, -r); ctx.lineTo(-r, r); ctx.stroke(); }
+      }}));
+    const cb = (label, col, dcol, fn) => Btn({col, dcol, vis: false, sc: 0, onTap: fn, draw(b) { jtext(label, 0, 0, Math.min(b.h * .38, b.w * .85 / label.length), P.white, {outline: dcol}); }});
+    this.again = cb('もういちど', P.blue, ONE.lo, () => { sfx.select(); startStage(G.si); });
+    this.next = cb('つぎへ ▶', P.green, P.dgreen, () => { sfx.select(); startStage(Math.min(G.si + 1, STAGES.length - 1)); });
+    this.back = cb('もどる', P.lav, '#4b3f6b', () => { sfx.tap(); setScene('select'); });
+    this.btns = [this.home, this.say, this.merge, ...this.choices];
+    this.clearBtns = [this.again, this.next, this.back];
+  },
+  layout() {
+    const {x0, y0, w, h} = L, bar = L.bar;
+    Object.assign(this.home, {x: x0 + 6, y: y0 + 6, w: bar, h: bar});
+    Object.assign(this.say, {x: x0 + w - bar - 6, y: y0 + 6, w: bar, h: bar});
+    let ma;
+    if (L.portrait) {
+      const qh = clamp(h * .12, 60, 150);
+      L.q = {x: x0, y: y0 + bar + 8, w, h: qh};
+      const ch = clamp(h * .13, 64, 160), mh = clamp(h * .07, 44, 90), cy = y0 + h - ch - 8, gap = 10, bw = (w - 16 - gap * 2) / 3;
+      this.choices.forEach((b, i) => Object.assign(b, {x: x0 + 8 + i * (bw + gap), y: cy, w: bw, h: ch}));
+      Object.assign(this.merge, {x: x0 + w * .18, y: cy - mh - 12, w: w * .64, h: mh});
+      ma = {x: x0 + 8, y: L.q.y + qh, w: w - 16, h: cy - mh - 20 - (L.q.y + qh)};
+    } else {
+      const cH = (h - bar - 18) / (MATH + .6), sw = clamp(w - 16 - cH * (MATW + .6) - 16, Math.min(260, w * .4), w * .55), sx = x0 + w - sw;
+      ma = {x: x0 + 8, y: y0 + bar + 10, w: w - sw - 16, h: h - bar - 18};
+      L.q = {x: sx, y: y0 + bar + 6, w: sw - 8, h: clamp(h * .2, 50, 170)};
+      const mh = clamp(h * .12, 44, 90);
+      Object.assign(this.merge, {x: sx + sw * .1, y: L.q.y + L.q.h + 6, w: sw * .8 - 8, h: mh});
+      const top = this.merge.y + mh + 12, gap = 8, bh = (y0 + h - 8 - top - 2 * gap) / 3;
+      this.choices.forEach((b, i) => Object.assign(b, {x: sx, y: top + i * (bh + gap), w: sw - 8, h: bh}));
+    }
+    const c = L.c = Math.min(ma.w / (MATW + .6), ma.h / (MATH + .6));
+    L.mat = {x: ma.x + (ma.w - MATW * c) / 2, y: ma.y + (ma.h - MATH * c) / 2, w: MATW * c, h: MATH * c};
+    const bw = Math.min(w * .29, 240), bh = clamp(L.u * .13, 50, 100), gap = w * .02;
+    [this.again, this.next, this.back].forEach((b, i) => Object.assign(b, {x: x0 + w / 2 + (i - 1.5) * bw + (i - 1) * gap, y: y0 + h * .74, w: bw, h: bh}));
+  },
+  update(dt) {
+    for (const b of [...this.btns, ...this.clearBtns]) { b.press = Math.max(0, b.press - dt * 6); }
+    if (this.merge.vis && this.merge.en && !G.merging && G.phase === 'ask') this.merge.sc = 1 + Math.sin(T * 7) * .05;
+    for (const f of G.flyers) f.t += dt;
+    for (const f of G.flyers.filter(f => f.t >= f.dur)) { G.stars[f.i] = f.gold ? 2 : 1; sfx.coin(); const p = slotPos(f.i); burst(p.x, p.y, 14, [P.yellow, P.white], .5, .7); }
+    G.flyers = G.flyers.filter(f => f.t < f.dur);
+    if (G.bubble && (G.bubble.life -= dt) <= 0) G.bubble = null;
+    if (G.clear) {
+      G.clear.t += dt;
+      if (G.clear.t < 5 && Math.random() < dt * 3.5) {
+        const x = L.x0 + L.w * (.15 + Math.random() * .7), y = L.y0 + L.h * (.15 + Math.random() * .4);
+        burst(x, y, 50, [pick(FIRE), pick(FIRE), P.white], 1.1, 1.2); sfx.boom();
+      }
+    }
+  },
+  draw() {
+    drawPlayTop(); drawQuestion(); drawMat();
+    this.btns.forEach(drawBtn);
+    for (const f of G.flyers) {
+      const p = clamp(f.t / f.dur, 0, 1), e = E.inOutCubic(p), to = slotPos(f.i);
+      const x = f.x + (to.x - f.x) * e, y = f.y + (to.y - f.y) * e - Math.sin(p * Math.PI) * L.u * .25;
+      drawStar(x, y, L.bar * (1.4 - .7 * p), f.gold ? P.yellow : P.lgray);
+    }
+    drawBubble();
+    if (G.clear) drawClear();
+  },
+};
+function slotPos(i) {
+  const bar = L.bar, x1 = L.x0 + bar + 16, x2 = L.x0 + L.w - bar - 16, s = Math.min(bar * .7, (x2 - x1) / 10.5);
+  const step = (x2 - x1) / 10;
+  return {x: x1 + step * (i + .5), y: L.y0 + 6 + bar / 2, s};
+}
+function drawPlayTop() {
+  for (let i = 0; i < 10; i++) {
+    const p = slotPos(i), st = G.stars[i];
+    if (st) drawStar(p.x, p.y, p.s * (1 + (i === G.q - 1 ? Math.max(0, Math.sin(T * 8)) * .08 : 0)), st === 2 ? P.yellow : P.lgray);
+    else { ctx.globalAlpha = i === G.q ? .6 + .3 * Math.sin(T * 6) : .3; drawStar(p.x, p.y, p.s * .8, '#5a6a9a'); ctx.globalAlpha = 1; }
+  }
+}
+function drawQuestion() {
+  const q = L.q, u = L.u;
+  // ねこ
+  const catH = Math.min(q.h * .85, q.w * .22), px = catH / 11, cw = 13 * px;
+  const cx0 = q.x + (L.portrait ? 12 : 4), cy0 = q.y + q.h / 2 - catH / 2;
+  const bob = Math.sin(T * 3) * px * .5 - G.cat.jump * catH * .5;
+  const sh = Math.sin(T * 50) * G.cat.shake * px * 1.5;
+  sprite(G.cat.happy > 0 ? SPR.catHappy : SPR.cat, cx0 + sh, cy0 + bob, px, CATPAL);
+  G.catPos = {x: cx0 + cw, y: cy0};
+  // しき
+  const left = `${G.a}+${G.b}=`, ans = G.reveal > 0 ? '' + G.sum : '?';
+  const n = left.length + ans.length, areaX = cx0 + cw + 10, areaW = q.x + q.w - areaX - 6;
+  const ppx = Math.min(areaW / (n * 6), q.h * .62 / 7);
+  const tw = n * 6 * ppx - ppx, sx = areaX + (areaW - tw) / 2, y = q.y + q.h / 2;
+  ctx.save(); ctx.translate(sx + tw / 2, y); ctx.scale(G.qA, G.qA); ctx.translate(-(sx + tw / 2), -y);
+  ptext(left, sx, y, ppx, eqCols(G.a, G.b), {align: 'left'});
+  const ax = sx + left.length * 6 * ppx;
+  if (G.reveal > 0) {
+    const s = G.reveal, w = ans.length * 6 * ppx;
+    ctx.save(); ctx.translate(ax + w / 2, y); ctx.scale(s, s); ptext(ans, 0, 0, ppx, numCols(G.sum)); ctx.restore();
+  } else ptext('?', ax, y + Math.sin(T * 5) * ppx * .6, ppx, P.yellow, {align: 'left'});
+  ctx.restore();
+  G.eqPos = {x: sx + tw / 2, y};
+}
+function drawBubble() {
+  const bb = G.bubble; if (!bb || !G.catPos) return;
+  const size = clamp(L.u * .055, 16, 36);
+  ctx.font = `${Math.round(size)}px ${FONT}`;
+  const tw = ctx.measureText(bb.text).width, pw = tw + size * 1.2, ph = size * 1.8;
+  const a = Math.min(1, bb.life * 3);
+  const x = L.mat.x + L.mat.w / 2 - pw / 2, y = L.mat.y + L.c * 2.2;
+  ctx.globalAlpha = a;
+  ctx.fillStyle = '#000a'; rrect(x + 3, y + 3, pw, ph, ph * .3); ctx.fill();
+  ctx.fillStyle = P.white; rrect(x, y, pw, ph, ph * .3); ctx.fill();
+  jtext(bb.text, x + pw / 2, y + ph / 2, size, bb.col || P.navy, {outline: false});
+  ctx.globalAlpha = 1;
+}
+function say(text, life = 2.2, col) { G.bubble = {text, life, col}; }
+
+function drawMat() {
+  const m = L.mat, c = L.c;
+  // わく
+  ctx.fillStyle = '#0b1230'; rrect(m.x - c * .35, m.y - c * .35, m.w + c * .7, m.h + c * .7, c * .6); ctx.fill();
+  ctx.strokeStyle = '#3b4a7d'; ctx.lineWidth = Math.max(2, c * .15); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,163,0,.08)'; ctx.fillRect(m.x, m.y, M.tensW * c, m.h);
+  ctx.fillStyle = 'rgba(41,173,255,.08)'; ctx.fillRect(m.x + M.tensW * c, m.y, M.onesW * c, m.h);
+  ctx.fillStyle = '#3b4a7d'; ctx.fillRect(m.x + M.tensW * c - c * .06, m.y, c * .12, m.h);
+  // みだし
+  const hy = m.y + M.headH * c * .5, hp = c * .16;
+  ctx.fillStyle = TEN.base; ctx.fillRect(m.x + M.tensW * c / 2 - c * 2.2, hy - c * .5, c * .3, c * 1);
+  ptext('10', m.x + M.tensW * c / 2 + c * .2, hy, hp, TEN.base);
+  ctx.fillStyle = ONE.base; ctx.fillRect(m.x + (M.tensW + M.onesW / 2) * c - c * 1.3, hy - c * .15, c * .3, c * .3);
+  ptext('1', m.x + (M.tensW + M.onesW / 2) * c + c * .2, hy, hp, ONE.base);
+  ctx.fillStyle = '#3b4a7d'; ctx.fillRect(m.x, m.y + M.headH * c - c * .05, m.w, c * .1);
+  // くぎり
+  const sy = m.y + (M.headH + M.rowH) * c;
+  ctx.fillStyle = `rgba(194,195,199,${.5 * G.wmA + .15})`;
+  for (let x = 0; x < m.w; x += c * .8) ctx.fillRect(m.x + x, sy - c * .05, c * .45, c * .1);
+  // 「+」
+  ctx.globalAlpha = G.wmA; ptext('+', m.x - c * .05, sy + c * .9, c * .17, P.white, {align: 'left'}); ctx.globalAlpha = 1;
+  // すかし すうじ
+  const wpx = c * 1.25, aT = Math.floor(G.a / 10), a1 = G.a % 10, bT = Math.floor(G.b / 10), b1 = G.b % 10;
+  ctx.globalAlpha = .16 * G.wmA;
+  const wm = (r, col, d) => { if (d > 0) { const p = cellC(r, col); ptext('' + d, p.x, p.y, wpx, col ? ONE.base : TEN.base, {shadow: false}); } };
+  wm(0, 0, aT); wm(0, 1, a1); wm(1, 0, bT); wm(1, 1, b1);
+  ctx.globalAlpha = 1;
+  // がったい あと: たてに けいさん
+  if (G.lblA > 0) {
+    ctx.globalAlpha = G.lblA;
+    const lp = c * .5;
+    const tl = [aT, bT].filter(v => v > 0).join('+') + (G.carried ? '+1' : '');
+    const ol = [a1, b1].filter(v => v > 0).join('+');
+    const colsOf = (s, col) => [...s].map(ch => ch === '+' ? P.white : col);
+    const p0 = cellC(1, 0), p1 = cellC(1, 1), ly = m.y + (M.headH + M.rowH + 1.4) * c;
+    if (tl) ptext(tl, p0.x, ly, Math.min(lp, M.tensW * c * .8 / (tl.length * 6)), colsOf(tl, TEN.base));
+    if (tl && G.carried) { const w = tl.length * 6 * lp; ctx.strokeStyle = P.yellow; ctx.lineWidth = c * .12; ctx.strokeRect(p0.x + w / 2 - 2 * 6 * lp + lp * .2, ly - lp * 4.4, 2 * 6 * lp - lp * .4, lp * 8.8); }
+    if (ol) ptext(ol, p1.x, ly, Math.min(lp, M.onesW * c * .85 / (ol.length * 6)), colsOf(ol, ONE.base));
+    ctx.globalAlpha = 1;
+  }
+  if (G.reveal > 0) {
+    const s = clamp(G.reveal, 0, 1.3), rp = c * .95, st = Math.floor(G.sum / 10), s1 = G.sum % 10;
+    const p0 = cellC(1, 0), p1 = cellC(1, 1), y = p0.y + c * 1.3;
+    for (const [p, d, col] of [[p0, st, TEN.base], [p1, s1, ONE.base]]) {
+      ctx.save(); ctx.translate(p.x, y); ctx.scale(s, s); ptext('' + d, 0, 0, rp, col); ctx.restore();
+    }
+  }
+  // ブロック
+  for (const b of G.blocks) drawBlock(b);
+}
+function drawBlock(b) {
+  const c = L.c, m = L.mat, isRod = b.kind === 'rod';
+  const s = c * .94;
+  const cx = m.x + (b.x + .5) * c, cy = m.y + (b.y + (isRod ? 5 : .5)) * c - (b.hop || 0) * c;
+  ctx.save(); ctx.globalAlpha = b.a; ctx.translate(cx, cy); ctx.scale(b.s, b.s);
+  if (isRod) rod(-s / 2, -5 * c + (c - s) / 2, s, b.carry ? {dark: '#6a2a00', base: '#ffb61e', hi: '#fff6b0', lo: '#e07000'} : TEN);
+  else cube(-s / 2, -s / 2, s, ONE);
+  if (b.fl > 0) { ctx.globalAlpha = b.a * b.fl; ctx.fillStyle = '#fff'; if (isRod) ctx.fillRect(-s / 2, -5 * c, s, 10 * c); else ctx.fillRect(-s / 2, -s / 2, s, s); }
+  ctx.restore();
+  if (b.carry) { // きらきら
+    for (let k = 0; k < 3; k++) {
+      const ph = T * 3 + k * 2.1, a = Math.max(0, Math.sin(ph));
+      if (a < .2) continue;
+      const sx = cx + Math.sin(k * 7.3 + Math.floor(ph / Math.PI)) * c * .9, sy = cy + Math.cos(k * 3.1 + Math.floor(ph / Math.PI)) * c * 4;
+      ctx.globalAlpha = a; ctx.fillStyle = P.white; const z = c * .18 * a;
+      ctx.fillRect(sx - z * 2, sy - z / 2, z * 4, z); ctx.fillRect(sx - z / 2, sy - z * 2, z, z * 4);
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+function drawClear() {
+  const cl = G.clear, u = L.u, cx = L.x0 + L.w / 2;
+  ctx.fillStyle = `rgba(10,14,40,${.72 * cl.a})`; ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = cl.a;
+  const txt = 'クリア!', sz = u * .2;
+  for (let i = 0; i < txt.length; i++) {
+    const col = FIRE[(i + Math.floor(T * 8)) % FIRE.length];
+    jtext(txt[i], cx + (i - (txt.length - 1) / 2) * sz * 1.05, L.y0 + L.h * .25 + Math.sin(T * 6 + i) * sz * .1, sz * cl.a, col, {outline: P.plum});
+  }
+  const golds = G.stars.filter(s => s === 2).length;
+  const ss = Math.min(u * .08, L.w * .9 / 10), sx = cx - ss * 4.5 * 1.1;
+  G.stars.forEach((s, i) => drawStar(sx + i * ss * 1.1, L.y0 + L.h * .45, ss * (1 + .12 * Math.sin(T * 5 + i)), s === 2 ? P.yellow : P.lgray));
+  ctx.font = `${Math.round(u * .16)}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(golds >= 10 ? '👑' : '🏅', cx, L.y0 + L.h * .6 + Math.sin(T * 3) * u * .01);
+  ctx.globalAlpha = 1;
+  scenes.play.clearBtns.forEach(drawBtn);
+}
+
+// ---------- あそび の ながれ ----------
+function spawnBlock(kind, row, i, list, k) {
+  const p = kind === 'rod' ? rodPos(row, i) : cubePos(row, i);
+  const bl = {kind, x: p.x, y: p.y - 1.5, s: 0, a: 1, fl: 0, hop: 0};
+  G.blocks.push(bl); list.push(bl);
+  tw(bl, {y: p.y, s: 1}, .32, {ease: E.outBack}); sfx.pop(k);
+}
+async function newQuestion() {
+  const f = newFlow(), pb = scenes.play;
+  let a, b; do { [a, b] = STAGES[G.si].gen(); } while (a * 100 + b === G.last); G.last = a * 100 + b;
+  Object.assign(G, {a, b, sum: a + b, merged: false, merging: false, missed: false, carried: false, phase: 'intro',
+    blocks: [], tens: [], ones: [], tensB: [], onesB: [], reveal: 0, qA: 0, wmA: 1, lblA: 0});
+  G.cat.happy = 0;
+  const ch = makeChoices(a, b);
+  pb.choices.forEach((bt, i) => Object.assign(bt, {val: ch[i], en: true, vis: false, sc: 0, good: 0, shake: 0}));
+  Object.assign(pb.merge, {vis: false, en: true, sc: 0});
+  sfx.whoosh(); tw(G, {qA: 1}, .45, {ease: E.outBack});
+  await f.sleep(.3);
+  let k = 0;
+  for (let i = 0; i < Math.floor(a / 10); i++) { spawnBlock('rod', 0, i, G.tens, k++); await f.sleep(.09); }
+  for (let i = 0; i < a % 10; i++) { spawnBlock('cube', 0, i, G.ones, k++); await f.sleep(.055); }
+  await f.sleep(.2); k = 2;
+  for (let i = 0; i < Math.floor(b / 10); i++) { spawnBlock('rod', 1, i, G.tensB, k++); await f.sleep(.09); }
+  for (let i = 0; i < b % 10; i++) { spawnBlock('cube', 1, i, G.onesB, k++); await f.sleep(.055); }
+  await f.sleep(.15);
+  speak(`${a} たす ${b} は?`);
+  G.phase = 'ask';
+  pb.choices.forEach((bt, i) => { bt.vis = true; tw(bt, {sc: 1}, .35, {delay: i * .08, ease: E.outBack}); });
+  pb.merge.vis = true; tw(pb.merge, {sc: 1}, .35, {delay: .25, ease: E.outBack});
+  if (!G.hintShown) { G.hintShown = true; say('がったい で あわせて みよう!', 3); }
+}
+async function doMerge() {
+  if (G.merged || G.merging) return;
+  const f = curFlow(), pb = scenes.play;
+  G.merging = true;
+  tw(pb.merge, {sc: 0}, .2, {ease: E.inCubic}).then(() => { pb.merge.vis = false; });
+  sfx.merge(); tw(G, {wmA: 0}, .5);
+  const aT = G.tens.length, a1 = G.ones.length; let k = 0;
+  const moves = [];
+  const move = (bl, p, delay) => {
+    tw(bl, {hop: 1.4}, .25, {delay, ease: E.outCubic}).then(() => tw(bl, {hop: 0}, .25, {ease: E.inCubic}));
+    moves.push(tw(bl, {x: p.x, y: p.y}, .5, {delay, ease: E.inOutCubic}).then(() => {
+      if (!f.alive()) return;
+      sfx.land(k++); const c = L.c, m = L.mat; burst(m.x + (p.x + .5) * c, m.y + (p.y + 1) * c, 5, [P.white, P.yellow], .3, .6);
+    }));
+  };
+  G.tensB.forEach((bl, j) => move(bl, rodPos(0, aT + j), j * .1));
+  G.onesB.forEach((bl, j) => move(bl, cubePos(0, a1 + j), .12 + G.tensB.length * .06 + j * .07));
+  await Promise.all(moves); f.check();
+  G.tens = G.tens.concat(G.tensB); G.ones = G.ones.concat(G.onesB); G.tensB = []; G.onesB = [];
+  if (G.ones.length >= 10) { await f.sleep(.3); await carryAnim(f); }
+  G.merged = true; G.merging = false;
+  tw(G, {lblA: 1}, .4);
+}
+async function carryAnim(f) {
+  const ten = G.ones.slice(0, 10), rest = G.ones.slice(10), c = L.c, m = L.mat;
+  sfx.shine(); ten.forEach(bl => { bl.fl = 1; tw(bl, {fl: 0}, .5); });
+  const oc = cellC(0, 1);
+  popText('10こ!', oc.x, oc.y - c * 2, c * 2.2, P.yellow);
+  speak('じゅう!');
+  await f.sleep(.55);
+  const col = M.tensW + 0.75 + 2 * 1.2, top = M.headH + 0.65;
+  ten.forEach((bl, i) => tw(bl, {x: col, y: top + i}, .35, {delay: i * .06, ease: E.inOutCubic}).then(() => { if (f.alive()) sfx.count(i); }));
+  await f.sleep(.35 + .6 + .15);
+  // がったい!
+  ten.forEach(bl => { bl.fl = 1; });
+  await f.sleep(.08);
+  sfx.carry(); shake = .45;
+  const cx = L.mat.x + (col + .5) * L.c, cy = L.mat.y + (top + 5) * L.c;
+  burst(cx, cy, 40, [P.yellow, P.white, P.orange], 1, 1);
+  G.blocks = G.blocks.filter(b => !ten.includes(b));
+  const r = {kind: 'rod', x: col, y: top, s: 1, a: 1, fl: 1, hop: 0, carry: true};
+  G.blocks.push(r);
+  tw(r, {fl: 0}, .5);
+  tw(r, {s: 1.25}, .12).then(() => tw(r, {s: 1}, .25, {ease: E.outBack}));
+  popText('ぼう 1ぽん!', cx, cy - c * 6.5, c * 1.6, P.orange);
+  await f.sleep(.5);
+  const p = rodPos(0, G.tens.length);
+  sfx.jump();
+  tw(r, {hop: 3}, .32, {ease: E.outCubic}).then(() => tw(r, {hop: 0}, .32, {ease: E.inCubic}));
+  await tw(r, {x: p.x, y: p.y}, .64, {ease: E.inOutCubic}); f.check();
+  sfx.thud(); shake = .25;
+  burst(L.mat.x + (p.x + .5) * L.c, L.mat.y + (p.y + 10) * L.c, 20, [P.orange, P.yellow, P.white], .6, .8);
+  G.tens.push(r); G.ones = rest; G.carried = true;
+  rest.forEach((bl, i) => { const q = cubePos(0, i); tw(bl, {x: q.x, y: q.y}, .3, {delay: i * .05, ease: E.outBack}); });
+  await f.sleep(.4);
+}
+async function onChoice(btn) {
+  if (G.phase !== 'ask' || !btn.en) return;
+  const f = curFlow(), pb = scenes.play;
+  if (btn.val !== G.sum) {
+    sfx.wrong(); btn.en = false; btn.shake = 1; tw(btn, {shake: 0}, .5);
+    G.missed = true; G.combo = 0;
+    G.cat.shake = 1; tw(G.cat, {shake: 0}, .5);
+    if (!G.merged && !G.merging) { say('おしい! がったい して みよう'); run(doMerge()); }
+    else say('ぼうと つぶを かぞえて みよう');
+    return;
+  }
+  G.phase = 'done'; G.combo++;
+  sfx.correct();
+  burst(btn.x + btn.w / 2, btn.y + btn.h / 2, 45, FIRE, 1.2, 1.1);
+  tw(btn, {sc: 1.08}, .15, {ease: E.outBack});
+  pb.choices.forEach(b => { if (b !== btn) tw(b, {sc: .0}, .3, {ease: E.inCubic}); });
+  G.cat.happy = 1; tw(G.cat, {jump: 1}, .18, {ease: E.outCubic}).then(() => tw(G.cat, {jump: 0}, .25, {ease: E.inCubic}));
+  say(pick(PRAISE), 1.8, P.red);
+  const gold = !G.missed;
+  G.flyers.push({x: btn.x + btn.w / 2, y: btn.y + btn.h / 2, t: -.15, dur: .75, i: G.q, gold});
+  if (!G.merged) {
+    if (!G.merging) await doMerge(); f.check();
+    while (G.merging) await f.sleep(.1);
+  }
+  speak(`${G.a} たす ${G.b} は、${G.sum}!`);
+  tw(G, {reveal: 1}, .5, {ease: E.outBack});
+  burst(G.eqPos.x, G.eqPos.y, 25, [P.yellow, P.white, P.pink], .7, .8);
+  const rc = cellC(1, 0), rc1 = cellC(1, 1);
+  burst(rc.x, rc.y + L.c, 15, [TEN.base, P.yellow], .6, .8); burst(rc1.x, rc1.y + L.c, 15, [ONE.base, P.white], .6, .8);
+  if (G.combo >= 3) {
+    await f.sleep(.3);
+    popText(`${G.combo}れんぞく!`, L.x0 + L.w / 2, L.mat.y + L.mat.h * .45, L.u * .09, pick([P.yellow, P.pink, P.green]), {life: 1.4});
+    sfx.combo(G.combo);
+  }
+  await f.sleep(2.0);
+  G.q++;
+  if (G.q >= 10) await stageClear(f); else await newQuestion();
+}
+async function stageClear(f) {
+  const pb = scenes.play;
+  G.phase = 'clear';
+  const earned = G.stars.filter(s => s > 0).length, golds = G.stars.filter(s => s === 2).length;
+  SAVE.stars += earned; SAVE.best[G.si] = Math.max(SAVE.best[G.si] || 0, golds); save();
+  G.clear = {t: 0, a: 0};
+  tw(G.clear, {a: 1}, .5);
+  pb.choices.forEach(b => b.vis = false); pb.merge.vis = false;
+  sfx.fanfare(); speak('ステージ クリア! すごいね!', .3);
+  await f.sleep(1.2);
+  pb.clearBtns.forEach((b, i) => { b.vis = !(b === pb.next && G.si >= STAGES.length - 1); b.sc = 0; tw(b, {sc: 1}, .4, {delay: i * .1, ease: E.outBack}); });
+}
+
+// =====================================================================
+//  LAYOUT / LOOP / INPUT
+// =====================================================================
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 3);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  layout();
+}
+function layout() {
+  const cs = getComputedStyle(document.getElementById('safe'));
+  const sa = {t: parseFloat(cs.paddingTop) || 0, b: parseFloat(cs.paddingBottom) || 0, l: parseFloat(cs.paddingLeft) || 0, r: parseFloat(cs.paddingRight) || 0};
+  Object.assign(L, {x0: sa.l + 4, y0: sa.t + 2, w: W - sa.l - sa.r - 8, h: H - sa.t - sa.b - 6});
+  L.portrait = L.h > L.w * 1.05;
+  L.u = Math.min(L.w, L.h);
+  L.bar = clamp(L.u * .11, 44, 84);
+  if (scene && scene.layout) scene.layout();
+}
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now; T += dt;
+  updTweens(dt); updTimers(dt); updFx(dt);
+  if (scene) scene.update(dt);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  drawBg();
+  if (shake > 0) { const a = shake * L.u * .03; ctx.translate((Math.random() - .5) * a, (Math.random() - .5) * a); }
+  scene.draw();
+  drawFx();
+  requestAnimationFrame(frame);
+}
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  audioInit();
+  const x = e.clientX, y = e.clientY;
+  if (sceneName === 'title') { scene.tap(); return; }
+  let list = scene.btns || [];
+  if (sceneName === 'play' && G && G.clear) list = scene.clearBtns;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const b = list[i];
+    if (hit(b, x, y)) { b.press = 1; b.onTap(b); return; }
+  }
+}, {passive: false});
+document.addEventListener('touchmove', e => e.preventDefault(), {passive: false});
+document.addEventListener('gesturestart', e => e.preventDefault());
+window.addEventListener('resize', () => setTimeout(resize, 50));
+document.addEventListener('visibilitychange', () => {
+  if (!S.ac) return;
+  if (document.hidden) { BGM.stop(); S.ac.suspend(); if (window.speechSynthesis) speechSynthesis.cancel(); }
+  else { S.ac.resume(); applySound(); }
+});
+if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+
+setScene('title');
+resize();
+(document.fonts && document.fonts.load ? document.fonts.load(`20px "DotGothic16"`) : Promise.resolve()).catch(() => {}).finally(() => {});
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
