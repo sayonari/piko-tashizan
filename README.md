@@ -5,6 +5,8 @@ iPhone / iPad の Safari でそのまま遊べます（インストール不要�
 
 ▶ **あそぶ: https://sayonari.github.io/piko-tashizan/**
 
+姉妹作: [ピコピコかけざん](https://sayonari.github.io/piko-kakezan/)（九九）
+
 ## あそびかた
 1. 上に `23+14=?` のような問題が出て、盤面に **オレンジの10のぼう** と **青い1のつぶ** が並びます
    - 左の列 = 10のくらい（ぼう）、右の列 = 1のくらい（つぶ）… そろばん・筆算と同じ並び
