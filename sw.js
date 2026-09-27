@@ -1,6 +1,6 @@
 // ネットワーク優先・オフライン時はキャッシュ
-const CACHE = 'piko-tashizan-v2';
-const ASSETS = ['./', './index.html', './fever.js', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
+const CACHE = 'piko-tashizan-v3';
+const ASSETS = ['./', './index.html', './fever.js', './battle.js', './menu.js', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS))); self.skipWaiting(); });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))));

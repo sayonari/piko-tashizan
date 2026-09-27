@@ -28,6 +28,8 @@ canvas{display:block;position:fixed;left:0;top:0}
 <canvas id="c"></canvas>
 <div id="safe"></div>
 <script src="fever.js"></script>
+<script src="battle.js"></script>
+<script src="menu.js"></script>
 <script>
 'use strict';
 // =====================================================================
@@ -398,8 +400,10 @@ const STAGES = [
   {name: 'くりあがり 2けた', ex: '38+25', gen: () => { const a1 = rnd(1, 9), aT = rnd(1, 7); return [10 * aT + a1, 10 * rnd(1, 8 - aT) + rnd(Math.max(1, 10 - a1), 9)]; }},
   {name: 'ぜんぶ ミックス',  ex: '??+??', gen: () => STAGES[rnd(1, 5)].gen()},
   {name: 'のうじるモード',   ex: '', fever: true, gen: () => STAGES[rnd(0, 5)].gen()},
+  {name: 'はやおしバトル',   ex: '', battle: 'race', gen: () => STAGES[rnd(0, 5)].gen()},
+  {name: 'じっくりバトル',   ex: '', battle: 'turn', gen: () => STAGES[rnd(0, 5)].gen()},
 ];
-const CARD_COLS = ['#008751', '#1a70c8', '#6b5fa0', '#d0487a', '#c97800', '#c8003c', '#7e2553'];
+const CARD_COLS = ['#008751', '#1a70c8', '#6b5fa0', '#d0487a', '#c97800', '#c8003c', '#7e2553', '#333', '#23408e', '#7a2e12'];
 const PRAISE = ['すごい!', 'やったね!', 'てんさい!', 'ばっちり!', 'かんぺき!', 'せいかい!', 'いいね!'];
 
 function makeChoices(a, b) {
@@ -464,40 +468,20 @@ scenes.title = {
   },
 };
 
-// ---------------- SELECT ----------------
-scenes.select = {
-  enter() {
-    const t = (k) => () => { SAVE[k] = !SAVE[k]; save(); audioInit(); applySound(); sfx.tap(); if (k === 'voice' && SAVE.voice) speak('こえ オン'); if (k === 'voice' && !SAVE.voice && window.speechSynthesis) speechSynthesis.cancel(); };
-    this.tog = [iconBtn('🔊', t('sfx'), () => !SAVE.sfx), iconBtn('🗣️', t('voice'), () => !SAVE.voice), iconBtn('🎵', t('bgm'), () => !SAVE.bgm)];
-    this.cards = STAGES.map((st, i) => Btn({col: CARD_COLS[i], dcol: '#0008', sc: 0, noHi: true, onTap: () => { sfx.select(); startStage(i); },
-      draw: (b) => drawCard(b, st, i)}));
-    this.cards.forEach((c, i) => tw(c, {sc: 1}, .4, {delay: .05 * i, ease: E.outBack}));
-    this.btns = [...this.tog, ...this.cards];
-  },
-  layout() {
-    const {x0, y0, w, h} = L, bar = L.bar;
-    this.tog.forEach((b, i) => Object.assign(b, {x: x0 + w - (3 - i) * (bar + 4) - 4, y: y0 + 6, w: bar, h: bar}));
-    const top = y0 + bar + 16 + L.u * .1, gap = clamp(L.u * .03, 8, 20);
-    const cols = L.portrait ? 2 : 4, rows = Math.ceil(STAGES.length / cols);
-    const cw = (w - gap * (cols + 1)) / cols, ch = Math.min((y0 + h - top - gap * rows) / rows, cw * .9);
-    this.hdrY = y0 + bar + 8 + L.u * .05;
-    this.cards.forEach((b, i) => {
-      const r = Math.floor(i / cols), c = i % cols;
-      const n = r === rows - 1 ? STAGES.length - r * cols : cols;
-      const ox = x0 + (w - (n * cw + (n - 1) * gap)) / 2;
-      Object.assign(b, {x: ox + c * (cw + gap), y: top + r * (ch + gap), w: cw, h: ch});
-    });
-  },
-  update() {},
-  draw() {
-    const u = L.u;
-    jtext('どれで あそぶ?', L.x0 + L.w / 2, this.hdrY, u * .075, P.white, {outline: P.plum});
-    drawStar(L.x0 + L.bar * .5 + 6, L.y0 + 6 + L.bar / 2, L.bar * .6, P.yellow);
-    jtext('' + SAVE.stars, L.x0 + L.bar + 10, L.y0 + 6 + L.bar / 2, L.bar * .55, P.yellow, {align: 'left'});
-    this.btns.forEach(drawBtn);
-  },
-};
+// ---------------- MENU ----------------
+const CATS = [
+  {name: 'やさしい', stars: 1, col: '#1f8f4e', sub: '30+4 ・ 23+4', items: [0, 1]},
+  {name: 'ふつう', stars: 2, col: '#1a62b8', sub: '23+30 ・ 23+14', items: [2, 3]},
+  {name: 'むずかしい', stars: 3, col: '#b8002f', sub: 'くりあがり ・ ミックス', items: [4, 5, 6]},
+  {name: 'ゲームで あそぶ', emoji: '🎮', game: true, col: '#7e2553', sub: 'のうじる・バトル', items: [7, 8, 9]},
+];
+setupMenu({cats: CATS,
+  drawCard: (b, i) => drawCard(b, STAGES[i], i),
+  cardCol: i => CARD_COLS[i],
+  start: i => startStage(i),
+  cleared: i => SAVE.best[i] != null});
 function drawCard(b, st, i) {
+  if (st.battle) return BT.drawCard(b, st.name, st.battle);
   if (st.fever) return FV.drawCard(b, st.name, SAVE.best[i]);
   const w = b.w, h = b.h - b.h * .09, top = -h / 2;
   const best = SAVE.best[i];
@@ -524,9 +508,11 @@ function startStage(si) {
   G = {si, q: 0, stars: Array(10).fill(0), combo: 0, blocks: [], tens: [], ones: [], tensB: [], onesB: [],
     a: 0, b: 0, sum: 0, phase: 'intro', qA: 0, reveal: 0, wmA: 1, lblA: 0, bubble: null, cat: {jump: 0, happy: 0, shake: 0},
     flyers: [], clear: null, last: -1, hintShown: false,
-    mode: STAGES[si].fever ? 'fever' : 'normal', time: 40, running: false, score: 0, maxCombo: 0, right: 0};
+    mode: STAGES[si].battle || (STAGES[si].fever ? 'fever' : 'normal'), battle: STAGES[si].battle || null,
+    time: 40, running: false, score: 0, maxCombo: 0, right: 0};
+  if (G.battle) { G.bt = BT.newState(G.battle); G.genQ = () => BT.hook.gen(G.bt.lv, G.bt.hard); }
   setScene('play');
-  run(G.mode === 'fever' ? feverStart() : newQuestion());
+  run(G.battle ? BT.run() : G.mode === 'fever' ? feverStart() : newQuestion());
 }
 async function feverStart() {
   const f = newFlow();
@@ -550,7 +536,7 @@ async function timeUp() {
 scenes.play = {
   enter() {
     const pb = this;
-    this.home = iconBtn('🏠', () => { sfx.tap(); newFlow(); if (window.speechSynthesis) speechSynthesis.cancel(); setScene('select'); });
+    this.home = iconBtn('🏠', () => { sfx.tap(); newFlow(); if (window.speechSynthesis) speechSynthesis.cancel(); setScene('cat'); });
     this.say = iconBtn('🔊', () => { sfx.tap(); if (G.phase !== 'clear') speak(`${G.a} たす ${G.b} は?`); });
     this.merge = Btn({col: P.green, dcol: P.dgreen, vis: false, sc: 0, onTap: () => { sfx.tap(); run(doMerge()); },
       draw(b) { const a = (T * 6) % (Math.PI * 2);
@@ -567,26 +553,30 @@ scenes.play = {
     const cb = (label, col, dcol, fn) => Btn({col, dcol, vis: false, sc: 0, onTap: fn, draw(b) { jtext(label, 0, 0, Math.min(b.h * .38, b.w * .85 / label.length), P.white, {outline: dcol}); }});
     this.again = cb('もういちど', P.blue, ONE.lo, () => { sfx.select(); startStage(G.si); });
     this.next = cb('つぎへ ▶', P.green, P.dgreen, () => { sfx.select(); startStage(Math.min(G.si + 1, STAGES.length - 1)); });
-    this.back = cb('もどる', P.lav, '#4b3f6b', () => { sfx.tap(); setScene('select'); });
+    this.back = cb('もどる', P.lav, '#4b3f6b', () => { sfx.tap(); setScene('cat'); });
     this.btns = [this.home, this.say, this.merge, ...this.choices];
+    if (G.battle) this.btns.push(...BT.makeButtons());
     this.clearBtns = [this.again, this.next, this.back];
   },
   layout() {
     const {x0, y0, w, h} = L, bar = L.bar;
     Object.assign(this.home, {x: x0 + 6, y: y0 + 6, w: bar, h: bar});
     Object.assign(this.say, {x: x0 + w - bar - 6, y: y0 + 6, w: bar, h: bar});
-    this.say.vis = G.mode !== 'fever';
+    this.say.vis = G.mode !== 'fever' && G.mode !== 'race';
     let ma;
+    const bpH = G.battle ? clamp(h * (L.portrait ? .2 : .27), 80, 260) : 0;
+    L.bp = G.battle ? {x: x0 + 6, y: y0 + bar + 6, w: w - 12, h: bpH} : null;
     if (L.portrait) {
-      const qh = clamp(h * .12, 60, 150);
-      L.q = {x: x0, y: y0 + bar + 8, w, h: qh};
+      const qh = clamp(h * (G.battle ? .09 : .12), 50, 150);
+      L.q = {x: x0, y: y0 + bar + 8 + (bpH ? bpH + 2 : 0), w, h: qh};
       const ch = clamp(h * .13, 64, 160), mh = clamp(h * .07, 44, 90), cy = y0 + h - ch - 8, gap = 10, bw = (w - 16 - gap * 2) / 3;
       this.choices.forEach((b, i) => Object.assign(b, {x: x0 + 8 + i * (bw + gap), y: cy, w: bw, h: ch}));
       Object.assign(this.merge, {x: x0 + w * .18, y: cy - mh - 12, w: w * .64, h: mh});
       ma = {x: x0 + 8, y: L.q.y + qh, w: w - 16, h: cy - mh - 20 - (L.q.y + qh)};
     } else {
-      const cH = (h - bar - 18) / (MATH + .6), sw = clamp(w - 16 - cH * (MATW + .6) - 16, Math.min(260, w * .4), w * .55), sx = x0 + w - sw;
-      ma = {x: x0 + 8, y: y0 + bar + 10, w: w - sw - 16, h: h - bar - 18};
+      const cH = (h - bar - 18 - bpH) / (MATH + .6), sw = clamp(w - 16 - cH * (MATW + .6) - 16, Math.min(260, w * .4), w * .55), sx = x0 + w - sw;
+      ma = {x: x0 + 8, y: y0 + bar + 10 + bpH, w: w - sw - 16, h: h - bar - 18 - bpH};
+      if (L.bp) L.bp.w = w - sw - 12;
       L.q = {x: sx, y: y0 + bar + 6, w: sw - 8, h: clamp(h * .2, 50, 170)};
       const mh = clamp(h * .12, 44, 90);
       Object.assign(this.merge, {x: sx + sw * .1, y: L.q.y + L.q.h + 6, w: sw * .8 - 8, h: mh});
@@ -597,9 +587,11 @@ scenes.play = {
     L.mat = {x: ma.x + (ma.w - MATW * c) / 2, y: ma.y + (ma.h - MATH * c) / 2, w: MATW * c, h: MATH * c};
     const bw = Math.min(w * .29, 240), bh = clamp(L.u * .13, 50, 100), gap = w * .02;
     [this.again, this.next, this.back].forEach((b, i) => Object.assign(b, {x: x0 + w / 2 + (i - 1.5) * bw + (i - 1) * gap, y: y0 + h * .74, w: bw, h: bh}));
+    if (G.battle) BT.layout(this.choices);
   },
   update(dt) {
     for (const b of [...this.btns, ...this.clearBtns]) { b.press = Math.max(0, b.press - dt * 6); }
+    if (G.battle) BT.update(dt);
     if (this.merge.vis && this.merge.en && !G.merging && G.phase === 'ask') this.merge.sc = 1 + Math.sin(T * 7) * .05;
     for (const f of G.flyers) f.t += dt;
     for (const f of G.flyers.filter(f => f.t >= f.dur)) { G.stars[f.i] = f.gold ? 2 : 1; sfx.coin(); const p = slotPos(f.i); burst(p.x, p.y, 14, [P.yellow, P.white], .5, .7); }
@@ -621,13 +613,15 @@ scenes.play = {
   },
   draw() {
     drawPlayTop(); drawQuestion(); drawMat();
-    this.btns.forEach(drawBtn);
+    if (G.battle) BT.drawPanel();
+    this.btns.forEach(b => { if (!G.battle || !BT.resBtns.includes(b)) drawBtn(b); });
     for (const f of G.flyers) {
       const p = clamp(f.t / f.dur, 0, 1), e = E.inOutCubic(p), to = slotPos(f.i);
       const x = f.x + (to.x - f.x) * e, y = f.y + (to.y - f.y) * e - Math.sin(p * Math.PI) * L.u * .25;
       drawStar(x, y, L.bar * (1.4 - .7 * p), f.gold ? P.yellow : P.lgray);
     }
     drawBubble();
+    if (G.battle) BT.drawOverlay();
     if (G.clear) drawClear();
   },
 };
@@ -637,6 +631,7 @@ function slotPos(i) {
   return {x: x1 + step * (i + .5), y: L.y0 + 6 + bar / 2, s};
 }
 function drawPlayTop() {
+  if (G.battle) { BT.drawTop(); return; }
   if (G.mode === 'fever') { FV.drawHud(G.score, G.time, 50, G.combo); return; }
   for (let i = 0; i < 10; i++) {
     const p = slotPos(i), st = G.stars[i];
@@ -651,7 +646,7 @@ function drawQuestion() {
   const cx0 = q.x + (L.portrait ? 12 : 4), cy0 = q.y + q.h / 2 - catH / 2;
   const bob = Math.sin(T * 3) * px * .5 - G.cat.jump * catH * .5;
   const sh = Math.sin(T * 50) * G.cat.shake * px * 1.5;
-  sprite(G.cat.happy > 0 ? SPR.catHappy : SPR.cat, cx0 + sh, cy0 + bob, px, CATPAL);
+  if (!G.battle) sprite(G.cat.happy > 0 ? SPR.catHappy : SPR.cat, cx0 + sh, cy0 + bob, px, CATPAL);
   G.catPos = {x: cx0 + cw, y: cy0};
   // しき
   const left = `${G.a}+${G.b}=`, ans = G.reveal > 0 ? '' + G.sum : '?';
@@ -781,14 +776,14 @@ function spawnBlock(kind, row, i, list, k) {
 }
 async function newQuestion() {
   const f = newFlow(), pb = scenes.play;
-  let a, b; do { [a, b] = STAGES[G.si].gen(); } while (a * 100 + b === G.last); G.last = a * 100 + b;
+  let a, b; do { [a, b] = G.genQ ? G.genQ() : STAGES[G.si].gen(); } while (a * 100 + b === G.last); G.last = a * 100 + b;
   Object.assign(G, {a, b, sum: a + b, merged: false, merging: false, missed: false, carried: false, phase: 'intro',
     blocks: [], tens: [], ones: [], tensB: [], onesB: [], reveal: 0, qA: 0, wmA: 1, lblA: 0});
   G.cat.happy = 0;
   const ch = makeChoices(a, b);
   pb.choices.forEach((bt, i) => Object.assign(bt, {val: ch[i], en: true, vis: false, sc: 0, good: 0, shake: 0}));
   Object.assign(pb.merge, {vis: false, en: true, sc: 0});
-  const fv = G.mode === 'fever', K = fv ? .4 : 1;
+  const fv = G.mode === 'fever' || G.mode === 'race', K = fv ? .4 : 1;
   sfx.whoosh(); tw(G, {qA: 1}, .45 * K, {ease: E.outBack});
   await f.sleep(.3 * K);
   let k = 0;
@@ -861,6 +856,7 @@ async function carryAnim(f) {
   await f.sleep(.4);
 }
 async function onChoice(btn) {
+  if (G.battle) { BT.answer(btn, btn.val === G.sum); return; }
   if (G.phase !== 'ask' || !btn.en) return;
   const f = curFlow(), pb = scenes.play;
   if (btn.val !== G.sum) {
@@ -924,8 +920,33 @@ async function stageClear(f) {
   pb.choices.forEach(b => b.vis = false); pb.merge.vis = false;
   sfx.fanfare(); speak('ステージ クリア! すごいね!', .3);
   await f.sleep(1.2);
-  pb.clearBtns.forEach((b, i) => { b.vis = !(b === pb.next && G.si >= STAGES.length - 1); b.sc = 0; tw(b, {sc: 1}, .4, {delay: i * .1, ease: E.outBack}); });
+  pb.clearBtns.forEach((b, i) => { b.vis = !(b === pb.next && G.si >= 6); b.sc = 0; tw(b, {sc: 1}, .4, {delay: i * .1, ease: E.outBack}); });
 }
+
+BT.init({
+  gen(lv, hard) {
+    if (hard) return STAGES[lv >= 3 ? 5 : 3].gen();
+    const pools = [[0, 1], [1, 2, 3], [2, 3, 4], [3, 4, 5], [4, 5]];
+    return STAGES[pick(pools[Math.min(lv, 5) - 1])].gen();
+  },
+  newQuestion: () => newQuestion(),
+  answerOf: () => G.sum,
+  choices: () => scenes.play.choices,
+  async reveal(fast) {
+    const mb = scenes.play.merge; if (mb.vis) tw(mb, {sc: 0}, .2).then(() => { mb.vis = false; });
+    if (!fast && !G.merged) { if (!G.merging) await doMerge(); while (G.merging) await wait(.1); }
+    tw(G, {reveal: 1}, .4, {ease: E.outBack}); await wait(fast ? .2 : .9);
+  },
+  onWrong() { if (!G.merged && !G.merging) run(doMerge()); },
+  clear() {
+    newFlow(); Object.assign(G, {qA: 0, phase: 'intro', a: 0, b: 0, sum: 0, blocks: [], tens: [], ones: [], tensB: [], onesB: [], reveal: 0, lblA: 0, wmA: 1, merged: false, merging: false});
+    scenes.play.choices.forEach(b => { b.vis = false; }); scenes.play.merge.vis = false;
+  },
+  raceTime: lv => Math.max(5, 14 - lv * 1.5),
+  critTime: 6,
+  start: si => startStage(si),
+  back: () => setScene('cat'),
+});
 
 // =====================================================================
 //  LAYOUT / LOOP / INPUT
